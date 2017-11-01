@@ -292,11 +292,15 @@ namespace overlay {
     for (int i = -(_BX_phys - 1); i < _nBunchTrain - (_BX_phys - 1); ++i)
       {
         permutation->push_back(i);
+	std::cout << "i: " << i << "\t permutation: " << permutation->at(i) << std::endl;
       }
 
     random_shuffle(permutation->begin(), permutation->end(), [](int n){ return CLHEP::RandFlat::shootInt(n); } );
 
     int random_file = CLHEP::RandFlat::shootInt(_inputFileNames.size());
+
+    std::cout << "random_file: " << random_file << std::endl;
+
     if( m_startWithBackgroundFile >= 0 ) {
       random_file = m_startWithBackgroundFile;
       m_startWithBackgroundFile = -1;
@@ -365,6 +369,8 @@ namespace overlay {
         for (int bxInTrain = 0; bxInTrain < _nBunchTrain; ++bxInTrain)
 	  {
             const int BX_number_in_train = permutation->at(bxInTrain);
+	    std::cout << "Index over Nbunchtrain: " << bxInTrain << "\t permutation content: " << BX_number_in_train << std::endl;
+
             int NOverlay_to_this_BX = 0;
 
             if (_Poisson)
