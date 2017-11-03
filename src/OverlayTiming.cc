@@ -14,6 +14,7 @@
 #include <IMPL/SimCalorimeterHitImpl.h>
 #include <IMPL/SimTrackerHitImpl.h>
 
+#include <marlin/Exceptions.h>
 #include <marlin/Global.h>
 #include <marlin/ProcessorEventSeeder.h>
 
@@ -234,6 +235,11 @@ namespace overlay {
 			       _OTE_int,
 			       float(10));
 
+    registerProcessorParameter("AllowReusingBackgroundFiles",
+			       "If true the same background file can be used for the same event",
+			       m_allowReusingBackgroundFiles,
+			       m_allowReusingBackgroundFiles);
+
     registerOptionalParameter("StartBackgroundFileIndex",
 			       "Which background file to startWith",
 			       m_startWithBackgroundFile,
@@ -286,20 +292,19 @@ namespace overlay {
         streamlog_out(DEBUG) << "Physics Event was placed in the " << _BX_phys << " bunch crossing!" << std::endl;
       }
 
+    std::vector<int> usedFiles;
+
     //define a permutation for the events to overlay -- the physics event is per definition at position 0
     std::vector<int> *permutation = new std::vector<int>;
 
     for (int i = -(_BX_phys - 1); i < _nBunchTrain - (_BX_phys - 1); ++i)
       {
         permutation->push_back(i);
-	std::cout << "i: " << i << "\t permutation: " << permutation->at(i) << std::endl;
       }
 
     random_shuffle(permutation->begin(), permutation->end(), [](int n){ return CLHEP::RandFlat::shootInt(n); } );
 
     int random_file = CLHEP::RandFlat::shootInt(_inputFileNames.size());
-
-    std::cout << "random_file: " << random_file << std::endl;
 
     if( m_startWithBackgroundFile >= 0 ) {
       random_file = m_startWithBackgroundFile;
@@ -313,6 +318,7 @@ namespace overlay {
         m_eventCounter = -1;
         streamlog_out(MESSAGE) << "Open background file: " << _inputFileNames.at(random_file) << std::endl;
       }
+    usedFiles.push_back(m_currentFileIndex);
 
     // read events until we get the event we want to start with
     if( m_startWithBackgroundEvent >= 0 ) {
@@ -363,140 +369,9 @@ namespace overlay {
 	  }
       }
 
-    if ((_inputFileNames.size() > 0) && (_NOverlay > 0.))
-      {
-        //Now overlay the background evnts to each bunchcrossing in the bunch train
-        for (int bxInTrain = 0; bxInTrain < _nBunchTrain; ++bxInTrain)
-	  {
-            const int BX_number_in_train = permutation->at(bxInTrain);
-	    std::cout << "Index over Nbunchtrain: " << bxInTrain << "\t permutation content: " << BX_number_in_train << std::endl;
-
-            int NOverlay_to_this_BX = 0;
-
-            if (_Poisson)
-	      {
-                NOverlay_to_this_BX = int(CLHEP::RandPoisson::shoot(_NOverlay));
-	      }
-            else
-	      {
-                NOverlay_to_this_BX = int(_NOverlay);
-	      }
-
-            streamlog_out(DEBUG) << "Will overlay " << NOverlay_to_this_BX << " events to BX number " << BX_number_in_train+_BX_phys << std::endl;
-
-            for (int k = 0; k < NOverlay_to_this_BX; ++k)
-	      {
-                overlay_Evt = overlay_Eventfile_reader->readNextEvent(LCIO::UPDATE);
-                ++m_eventCounter;
-                //if there are no events left in the actual file, open the next one.
-                if (overlay_Evt == 0)
-		  {
-                    overlay_Eventfile_reader->close();
-                    m_currentFileIndex = random_file = CLHEP::RandFlat::shootInt(_inputFileNames.size());
-                    overlay_Eventfile_reader->open (_inputFileNames.at(random_file));
-                    overlay_Evt = overlay_Eventfile_reader->readNextEvent(LCIO::UPDATE);
-                    m_eventCounter = 0; // this has to be zero, because we just read the first event of the file!
-                    streamlog_out(MESSAGE) << "Open background file: " << _inputFileNames.at(random_file) << std::endl;
-		  }
-
-                // the overlay_Event is now open, start to merge its collections with the ones of the accumulated overlay events collections
-                // all the preparatory work has been done now....
-                // first, let's see which collections are in the event
-
-                //first include the MCParticles into the physics event
-                try
-		  {
-		    //Do Not Need DestMap, because this is only MCParticles
-		    currentDest=_mcParticleCollectionName;
-		    streamlog_out(DEBUG) << "Merging MCParticles " << std::endl;
-		    merge_collections(overlay_Evt->getCollection(_mcParticleCollectionName), evt->getCollection(_mcParticleCollectionName), BX_number_in_train * _T_diff);
-		  }
-                catch (DataNotAvailableException& e)
-		  {
-                    streamlog_out(ERROR) << "Failed to extract MCParticle collection: " << e.what() << std::endl;
-                    throw e;
-		  }
-
-                collection_names_in_Evt = overlay_Evt->getCollectionNames();
-
-                for (unsigned int j = 0; j < collection_names_in_Evt->size(); ++j)
-		  {
-                    const std::string Collection_name = collection_names_in_Evt->at(j);
-
-                    LCCollection *Collection_in_overlay_Evt = overlay_Evt->getCollection(Collection_name);
-                    LCCollection *Collection_in_Physics_Evt = 0;
-
-                    //Skip the MCParticle collection
-                    if( Collection_name == _mcParticleCollectionName ) {
-                      continue;
-                    }
-
-                    define_time_windows(Collection_name);
-
-                    //the event can only make contributions to the readout, if the bx does not happen after the integration time stopped.
-                    //and we are only interested in Calorimeter or Trackerhits.
-
-                    if ((this_stop > (BX_number_in_train - _BX_phys) * _T_diff) &&
-			((Collection_in_overlay_Evt->getTypeName() == LCIO::SIMCALORIMETERHIT) || (Collection_in_overlay_Evt->getTypeName() == LCIO::SIMTRACKERHIT)) )
-		      {
-                        //Open the same collection in the physics event
-                        try
-			  {
-                            Collection_in_Physics_Evt = evt->getCollection(Collection_name);
-			  }
-                        catch (DataNotAvailableException& e)
-			  {
-                            streamlog_out(DEBUG) << "Add new Collection" << Collection_in_overlay_Evt->getTypeName() << " with name " << Collection_name << std::endl;
-                            LCCollectionVec *new_collection = new LCCollectionVec(Collection_in_overlay_Evt->getTypeName());
-
-                            StringVec stringKeys;
-                            Collection_in_overlay_Evt->getParameters().getStringKeys(stringKeys);
-                            for (unsigned i = 0, nStringKeys = stringKeys.size(); i < nStringKeys; ++i)
-			      {
-                                StringVec vals;
-                                Collection_in_overlay_Evt->getParameters().getStringVals(stringKeys[i], vals);
-                                new_collection->parameters().setValues(stringKeys[i], vals);
-			      }
-                            StringVec intKeys;
-                            Collection_in_overlay_Evt->getParameters().getIntKeys(intKeys);
-                            for (unsigned i = 0, nIntKeys = intKeys.size(); i < nIntKeys; ++i)
-			      {
-                                IntVec vals;
-                                Collection_in_overlay_Evt->getParameters().getIntVals(intKeys[i], vals);
-                                new_collection->parameters().setValues(intKeys[i], vals);
-			      }
-                            StringVec floatKeys;
-                            Collection_in_overlay_Evt->getParameters().getFloatKeys(floatKeys);
-                            for (unsigned i = 0, nFloatKeys = floatKeys.size(); i < nFloatKeys; ++i)
-			      {
-                                FloatVec vals;
-                                Collection_in_overlay_Evt->getParameters().getFloatVals(floatKeys[i], vals);
-                                new_collection->parameters().setValues(floatKeys[i], vals);
-			      }
-                            //there is a special Treatment for the TPC Hits in Frank's Processor... don't know why, I just do the same
-                            if (Collection_name == "TPCCollection")
-			      {
-                                LCFlagImpl thFlag(0);
-                                thFlag.setBit(LCIO::THBIT_MOMENTUM);
-                                new_collection->setFlag(thFlag.getFlag());
-			      }
-
-                            evt->addCollection(new_collection, Collection_name);
-                            Collection_in_Physics_Evt = evt->getCollection(Collection_name);
-			  }
-			
-			//Set DestMap back to the one for the Collection Name...
-			currentDest=Collection_name;
-			streamlog_out(DEBUG) << "Now overlaying collection " << Collection_name 
-					     << " And we have " << collDestMap[currentDest].size() << " Hits in destMap"
-					     << std::endl;
-			//Now we merge the collections
-                        merge_collections(Collection_in_overlay_Evt, Collection_in_Physics_Evt, BX_number_in_train * _T_diff);
-		      }
-		  }
-	      }
-	  }
-      } //If we have any files, and more than 0 events to overlay end 
+    if ((_inputFileNames.size() > 0) && (_NOverlay > 0.)) {
+      overlaying(evt, collection_names_in_Evt, permutation, random_file, usedFiles);
+    }//If we have any files, and more than 0 events to overlay end
 
     delete permutation;
     ++_nEvt;
@@ -797,6 +672,143 @@ namespace overlay {
 			 << " and we merged " << mergedN << "  others  "
 			 << std::endl;
 
+  }
+  //------------------------------------------------------------------------------------------------------------------------------------------
+
+  void OverlayTiming::overlaying(EVENT::LCEvent* evt, const std::vector<std::string>* collection_names_in_Evt,
+                                 std::vector<int>* permutation, int random_file, std::vector<int>& usedFiles) {
+    //Now overlay the background evnts to each bunchcrossing in the bunch train
+    for (int bxInTrain = 0; bxInTrain < _nBunchTrain; ++bxInTrain) {
+      const int BX_number_in_train = permutation->at(bxInTrain);
+
+      int NOverlay_to_this_BX = 0;
+
+      if (_Poisson) {
+        NOverlay_to_this_BX = int(CLHEP::RandPoisson::shoot(_NOverlay));
+      } else {
+        NOverlay_to_this_BX = int(_NOverlay);
+      }
+
+      streamlog_out(DEBUG) << "Will overlay " << NOverlay_to_this_BX << " events to BX number "
+                           << BX_number_in_train + _BX_phys << std::endl;
+
+      for (int k = 0; k < NOverlay_to_this_BX; ++k) {
+        overlay_Evt = overlay_Eventfile_reader->readNextEvent(LCIO::UPDATE);
+        ++m_eventCounter;
+        //if there are no events left in the actual file, open the next one.
+        if (overlay_Evt == 0) {
+          overlay_Eventfile_reader->close();
+
+          // used all available files
+          if (usedFiles.size() == _inputFileNames.size() && m_allowReusingBackgroundFiles) {
+            usedFiles.clear();
+            if (_inputFileNames.size() > 1) {
+              // do not use the same file immediately if we have more than 1
+              usedFiles.push_back(m_currentFileIndex);
+            }
+          } else {
+            throw marlin::StopProcessingException(this);
+          }
+
+          m_currentFileIndex = random_file = CLHEP::RandFlat::shootInt(_inputFileNames.size());
+
+          while (std::find(usedFiles.begin(), usedFiles.end(), m_currentFileIndex) != usedFiles.end()) {
+            m_currentFileIndex = random_file = CLHEP::RandFlat::shootInt(_inputFileNames.size());
+          }
+          usedFiles.push_back(m_currentFileIndex);
+          overlay_Eventfile_reader->open(_inputFileNames.at(random_file));
+          overlay_Evt    = overlay_Eventfile_reader->readNextEvent(LCIO::UPDATE);
+          m_eventCounter = 0;  // this has to be zero, because we just read the first event of the file!
+          streamlog_out(MESSAGE) << "Open background file: " << _inputFileNames.at(random_file) << std::endl;
+        }
+
+        // the overlay_Event is now open, start to merge its collections with the ones of the accumulated overlay events collections
+        // all the preparatory work has been done now....
+        // first, let's see which collections are in the event
+
+        //first include the MCParticles into the physics event
+        try {
+          //Do Not Need DestMap, because this is only MCParticles
+          currentDest = _mcParticleCollectionName;
+          streamlog_out(DEBUG) << "Merging MCParticles " << std::endl;
+          merge_collections(overlay_Evt->getCollection(_mcParticleCollectionName),
+                            evt->getCollection(_mcParticleCollectionName), BX_number_in_train * _T_diff);
+        } catch (DataNotAvailableException& e) {
+          streamlog_out(ERROR) << "Failed to extract MCParticle collection: " << e.what() << std::endl;
+          throw e;
+        }
+
+        collection_names_in_Evt = overlay_Evt->getCollectionNames();
+
+        for (unsigned int j = 0; j < collection_names_in_Evt->size(); ++j) {
+          const std::string Collection_name = collection_names_in_Evt->at(j);
+
+          LCCollection* Collection_in_overlay_Evt = overlay_Evt->getCollection(Collection_name);
+          LCCollection* Collection_in_Physics_Evt = 0;
+
+          //Skip the MCParticle collection
+          if (Collection_name == _mcParticleCollectionName) {
+            continue;
+          }
+
+          define_time_windows(Collection_name);
+
+          //the event can only make contributions to the readout, if the bx does not happen after the integration time stopped.
+          //and we are only interested in Calorimeter or Trackerhits.
+
+          if ((this_stop > (BX_number_in_train - _BX_phys) * _T_diff) &&
+              ((Collection_in_overlay_Evt->getTypeName() == LCIO::SIMCALORIMETERHIT) ||
+               (Collection_in_overlay_Evt->getTypeName() == LCIO::SIMTRACKERHIT))) {
+            //Open the same collection in the physics event
+            try {
+              Collection_in_Physics_Evt = evt->getCollection(Collection_name);
+            } catch (DataNotAvailableException& e) {
+              streamlog_out(DEBUG) << "Add new Collection" << Collection_in_overlay_Evt->getTypeName() << " with name "
+                                   << Collection_name << std::endl;
+              LCCollectionVec* new_collection = new LCCollectionVec(Collection_in_overlay_Evt->getTypeName());
+
+              StringVec stringKeys;
+              Collection_in_overlay_Evt->getParameters().getStringKeys(stringKeys);
+              for (unsigned i = 0, nStringKeys = stringKeys.size(); i < nStringKeys; ++i) {
+                StringVec vals;
+                Collection_in_overlay_Evt->getParameters().getStringVals(stringKeys[i], vals);
+                new_collection->parameters().setValues(stringKeys[i], vals);
+              }
+              StringVec intKeys;
+              Collection_in_overlay_Evt->getParameters().getIntKeys(intKeys);
+              for (unsigned i = 0, nIntKeys = intKeys.size(); i < nIntKeys; ++i) {
+                IntVec vals;
+                Collection_in_overlay_Evt->getParameters().getIntVals(intKeys[i], vals);
+                new_collection->parameters().setValues(intKeys[i], vals);
+              }
+              StringVec floatKeys;
+              Collection_in_overlay_Evt->getParameters().getFloatKeys(floatKeys);
+              for (unsigned i = 0, nFloatKeys = floatKeys.size(); i < nFloatKeys; ++i) {
+                FloatVec vals;
+                Collection_in_overlay_Evt->getParameters().getFloatVals(floatKeys[i], vals);
+                new_collection->parameters().setValues(floatKeys[i], vals);
+              }
+              //there is a special Treatment for the TPC Hits in Frank's Processor... don't know why, I just do the same
+              if (Collection_name == "TPCCollection") {
+                LCFlagImpl thFlag(0);
+                thFlag.setBit(LCIO::THBIT_MOMENTUM);
+                new_collection->setFlag(thFlag.getFlag());
+              }
+
+              evt->addCollection(new_collection, Collection_name);
+              Collection_in_Physics_Evt = evt->getCollection(Collection_name);
+            }
+
+            //Set DestMap back to the one for the Collection Name...
+            currentDest = Collection_name;
+            streamlog_out(DEBUG) << "Now overlaying collection " << Collection_name << " And we have "
+                                 << collDestMap[currentDest].size() << " Hits in destMap" << std::endl;
+            //Now we merge the collections
+            merge_collections(Collection_in_overlay_Evt, Collection_in_Physics_Evt, BX_number_in_train * _T_diff);
+          }
+        }
+      }
+    }
   }
 
   //------------------------------------------------------------------------------------------------------------------------------------------

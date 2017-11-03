@@ -78,6 +78,9 @@ namespace overlay {
 
     virtual void define_time_windows(const std::string &Collection_name);
 
+    void overlaying(EVENT::LCEvent* evt, const std::vector<std::string>* collection_names_in_Evt,
+                    std::vector<int>* permutation, int random_file, std::vector<int>& usedFiles);
+
     void crop_collection(EVENT::LCCollection *collection);
 
     void merge_collections(EVENT::LCCollection *source_collection, EVENT::LCCollection *dest_collection, float time_offset);
@@ -129,6 +132,7 @@ namespace overlay {
     int m_currentFileIndex = 0;
     int m_startWithBackgroundFile = -1;
     int m_startWithBackgroundEvent = -1;
+    bool m_allowReusingBackgroundFiles = true;
 
     float this_start = -0.25;
     float this_stop = std::numeric_limits<float>::max();
